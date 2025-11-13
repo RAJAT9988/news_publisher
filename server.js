@@ -67,9 +67,7 @@ app.use(cors({
         
         // In production, specify your allowed domains
 const allowedOrigins = [
-    'http://localhost:3000',
     'https://atomo.in',
-    'https://614c7d5ea070.ngrok-free.app',
 ];
 
         
@@ -286,9 +284,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   https://127.0.0.1:${PORT}`);
 
   console.log(`🌐 Network access from other devices:`);
-  networkIPs.forEach(ip => {
-    console.log(`   https://${ip}:${PORT}`);
-  });
+  console.log(`   https://atomo.in:${PORT}`);
 
   console.log(`\n📝 Admin panel: https://localhost:${PORT}/admin`);
   console.log(`🌐 Main website: https://localhost:${PORT}/`);
