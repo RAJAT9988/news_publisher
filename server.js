@@ -6,6 +6,7 @@ import bodyParser from 'body-parser';
 import multer from 'multer';
 import cors from 'cors';
 import os from 'os';
+import https from 'https';
 
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -263,28 +264,36 @@ app.use((error, req, res, next) => {
   res.status(500).json({ success: false, message: error.message });
 });
 
-// Start server on all network interfaces
-app.listen(PORT, '0.0.0.0', () => {
+// Create HTTPS server
+const httpsOptions = {
+  key: fs.readFileSync(path.join(__dirname, 'key.pem')),
+  cert: fs.readFileSync(path.join(__dirname, 'cert.pem'))
+};
+
+const server = https.createServer(httpsOptions, app);
+
+// Start HTTPS server on all network interfaces
+server.listen(PORT, '0.0.0.0', () => {
   initializeNewsFile();
   const uploadsDir = path.join(__dirname, 'uploads');
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
-  
-  console.log(`🚀 Server running on all network interfaces!`);
+
+  console.log(`🔒 HTTPS Server running on all network interfaces!`);
   console.log(`📍 Local access:`);
-  console.log(`   http://localhost:${PORT}`);
-  console.log(`   http://127.0.0.1:${PORT}`);
-  
+  console.log(`   https://localhost:${PORT}`);
+  console.log(`   https://127.0.0.1:${PORT}`);
+
   console.log(`🌐 Network access from other devices:`);
   networkIPs.forEach(ip => {
-    console.log(`   http://${ip}:${PORT}`);
+    console.log(`   https://${ip}:${PORT}`);
   });
-  
-  console.log(`\n📝 Admin panel: http://localhost:${PORT}/admin`);
-  console.log(`🌐 Main website: http://localhost:${PORT}/`);
+
+  console.log(`\n📝 Admin panel: https://localhost:${PORT}/admin`);
+  console.log(`🌐 Main website: https://localhost:${PORT}/`);
   console.log(`📁 Current directory: ${__dirname}`);
-  
+
   if (networkIPs.length === 0) {
     console.log(`\n⚠️  No network IPs found. Make sure you're connected to a network.`);
   } else {
