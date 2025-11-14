@@ -1,3 +1,4 @@
+// server.js  (ES-module version – works on https://atomo.in:3007)
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -8,291 +9,194 @@ import cors from 'cors';
 import os from 'os';
 import https from 'https';
 
-// Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3007;
 
-// Get network IPs
-function getNetworkIPs() {
-  const interfaces = os.networkInterfaces();
-  const addresses = [];
-  
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      // Skip internal and non-IPv4 addresses
-      if (iface.family === 'IPv4' && !iface.internal) {
-        addresses.push(iface.address);
-      }
+// ---------------------------------------------------------------------
+// 1. Load Let’s Encrypt certs (same paths you use in the first server)
+// ---------------------------------------------------------------------
+const privateKey = fs.readFileSync('./certs/privkey.pem', 'utf8');
+const certificate = fs.readFileSync('./certs/fullchain.pem', 'utf8');
+const credentials = { key: privateKey, cert: certificate };
+
+// ---------------------------------------------------------------------
+// 2. Helper: get external IPv4 address (used only for logging)
+// ---------------------------------------------------------------------
+function getExternalIp() {
+  const ifaces = os.networkInterfaces();
+  for (const iface of Object.values(ifaces)) {
+    for (const cfg of iface) {
+      if (cfg.family === 'IPv4' && !cfg.internal) return cfg.address;
     }
   }
-  return addresses;
+  return '127.0.0.1';
 }
+const EXTERNAL_IP = getExternalIp();
 
-const networkIPs = getNetworkIPs();
+// ---------------------------------------------------------------------
+// 3. CORS – production-ready (only atomo.in)
+// ---------------------------------------------------------------------
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // allow requests with no origin (Postman, curl, mobile apps)
+      if (!origin) return callback(null, true);
 
-// // Enhanced CORS middleware to allow all devices on network
-// app.use(cors({
-//     origin: function (origin, callback) {
-//         // Allow requests with no origin (like mobile apps or curl requests)
-//         if (!origin) return callback(null, true);
-        
-//         // Allow localhost and all network IPs
-//         if (
-//             origin.includes('localhost') || 
-//             origin.includes('127.0.0.1') ||
-//             networkIPs.some(ip => origin.includes(ip))
-//         ) {
-//             return callback(null, true);
-//         }
-        
-//         // Allow any origin in development
-//         return callback(null, true);
-//     },
-//     credentials: true
-// }));
+      // development – allow everything
+      if (process.env.NODE_ENV !== 'production') return callback(null, true);
 
-// In your server.js, update the CORS configuration:
-app.use(cors({
-    origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
-        if (!origin) return callback(null, true);
-        
-        // Allow all origins in development
-        if (process.env.NODE_ENV !== 'production') {
-            return callback(null, true);
-        }
-        
-        // In production, specify your allowed domains
-const allowedOrigins = [
-    'https://atomo.in',
-];
-
-        
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
+      // production – whitelist
+      const allowed = ['https://atomo.in'];
+      if (allowed.includes(origin)) return callback(null, true);
+      callback(new Error('Not allowed by CORS'));
     },
-    credentials: true
-}));
+    credentials: true,
+  })
+);
 
-// Middleware
+// ---------------------------------------------------------------------
+// 4. Middleware
+// ---------------------------------------------------------------------
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-
-// Serve ALL static files from current directory
-app.use(express.static(__dirname));
+app.use(express.static(__dirname));                     // serve everything in cwd
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadsDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
-    cb(null, 'uploads/');
+// ---------------------------------------------------------------------
+// 5. Multer – image uploads (max 5 MB)
+// ---------------------------------------------------------------------
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = path.join(__dirname, 'uploads');
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, 'uploads/');
+    },
+    filename: (_req, file, cb) => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9.\-]/g, '_');
+      cb(null, `${Date.now()}-${safe}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only images!'));
   },
-  filename: function (req, file, cb) {
-    const originalName = file.originalname.replace(/[^a-zA-Z0-9.\-]/g, '_');
-    cb(null, Date.now() + '-' + originalName);
-  }
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-const upload = multer({ 
-  storage: storage,
-  fileFilter: function (req, file, cb) {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed!'), false);
-    }
-  },
-  limits: {
-    fileSize: 5 * 1024 * 1024
-  }
-});
-
-// JSON file path for storing news
+// ---------------------------------------------------------------------
+// 6. JSON file handling (news)
+// ---------------------------------------------------------------------
 const NEWS_FILE = path.join(__dirname, 'news.json');
 
-// Initialize news.json if it doesn't exist
-function initializeNewsFile() {
-  if (!fs.existsSync(NEWS_FILE)) {
-    fs.writeFileSync(NEWS_FILE, JSON.stringify([]));
-  }
+function initNews() {
+  if (!fs.existsSync(NEWS_FILE)) fs.writeFileSync(NEWS_FILE, '[]');
 }
-
-// Read news from JSON file
 function readNews() {
-  try {
-    const data = fs.readFileSync(NEWS_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error reading news file:', error);
-    return [];
-  }
+  try { return JSON.parse(fs.readFileSync(NEWS_FILE, 'utf8')); }
+  catch { return []; }
+}
+function writeNews(data) {
+  try { fs.writeFileSync(NEWS_FILE, JSON.stringify(data, null, 2)); return true; }
+  catch { return false; }
 }
 
-// Write news to JSON file
-function writeNews(news) {
-  try {
-    fs.writeFileSync(NEWS_FILE, JSON.stringify(news, null, 2));
-    return true;
-  } catch (error) {
-    console.error('Error writing news file:', error);
-    return false;
-  }
-}
-
-// Routes
-
-// API Routes
+// ---------------------------------------------------------------------
+// 7. API routes
+// ---------------------------------------------------------------------
 app.get('/api/news', (req, res) => {
   const news = readNews();
-  // Add full URL for images
-  const newsWithFullUrls = news.map(item => ({
-    ...item,
-    image: item.image ? `${req.protocol}://${req.get('host')}${item.image}` : null
+  const base = `${req.protocol}://${req.get('host')}`;
+  const withUrl = news.map(n => ({
+    ...n,
+    image: n.image ? `${base}${n.image}` : null,
   }));
-  res.json(newsWithFullUrls);
+  res.json(withUrl);
 });
 
 app.get('/api/news/:id', (req, res) => {
+  const id = Number(req.params.id);
   const news = readNews();
-  const newsItem = news.find(item => item.id === parseInt(req.params.id));
-  if (newsItem) {
-    const itemWithFullUrl = {
-      ...newsItem,
-      image: newsItem.image ? `${req.protocol}://${req.get('host')}${newsItem.image}` : null
-    };
-    res.json(itemWithFullUrl);
-  } else {
-    res.status(404).json({ error: 'News item not found' });
-  }
+  const item = news.find(i => i.id === id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    ...item,
+    image: item.image ? `${base}${item.image}` : null,
+  });
 });
 
 app.post('/api/news', upload.single('image'), (req, res) => {
-  try {
-    const { title, subtitle, date, content } = req.body;
-    
-    if (!title || !content) {
-      return res.status(400).json({ success: false, message: 'Title and content are required' });
-    }
-    
-    const news = readNews();
-    
-    const newNewsItem = {
-      id: news.length > 0 ? Math.max(...news.map(item => item.id)) + 1 : 1,
-      title: title.trim(),
-      subtitle: subtitle ? subtitle.trim() : '',
-      date: date || new Date().toISOString().split('T')[0],
-      content: content.trim(),
-      image: req.file ? `/uploads/${req.file.filename}` : null,
-      createdAt: new Date().toISOString()
-    };
-    
-    news.unshift(newNewsItem);
-    
-    if (writeNews(news)) {
-      res.json({ 
-        success: true, 
-        message: 'News published successfully!', 
-        news: newNewsItem 
-      });
-    } else {
-      res.status(500).json({ success: false, message: 'Failed to publish news' });
-    }
-  } catch (error) {
-    console.error('Error publishing news:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
+  const { title, subtitle, date, content } = req.body;
+  if (!title || !content) return res.status(400).json({ success: false, message: 'title & content required' });
+
+  const news = readNews();
+  const newItem = {
+    id: news.length ? Math.max(...news.map(i => i.id)) + 1 : 1,
+    title: title.trim(),
+    subtitle: subtitle?.trim() ?? '',
+    date: date || new Date().toISOString().split('T')[0],
+    content: content.trim(),
+    image: req.file ? `/uploads/${req.file.filename}` : null,
+    createdAt: new Date().toISOString(),
+  };
+
+  news.unshift(newItem);
+  writeNews(news)
+    ? res.json({ success: true, news: newItem })
+    : res.status(500).json({ success: false, message: 'write error' });
 });
 
 app.delete('/api/news/:id', (req, res) => {
+  const id = Number(req.params.id);
   const news = readNews();
-  const newsItem = news.find(item => item.id === parseInt(req.params.id));
-  
-  if (!newsItem) {
-    return res.status(404).json({ success: false, message: 'News item not found' });
+  const idx = news.findIndex(i => i.id === id);
+  if (idx === -1) return res.status(404).json({ success: false, message: 'Not found' });
+
+  // delete image file
+  if (news[idx].image) {
+    const p = path.join(__dirname, news[idx].image);
+    fs.existsSync(p) && fs.unlinkSync(p);
   }
-  
-  if (newsItem.image) {
-    const imagePath = path.join(__dirname, newsItem.image);
-    if (fs.existsSync(imagePath)) {
-      fs.unlinkSync(imagePath);
-    }
-  }
-  
-  const filteredNews = news.filter(item => item.id !== parseInt(req.params.id));
-  
-  if (writeNews(filteredNews)) {
-    res.json({ success: true, message: 'News deleted successfully!' });
-  } else {
-    res.status(500).json({ success: false, message: 'Failed to delete news' });
-  }
+
+  news.splice(idx, 1);
+  writeNews(news)
+    ? res.json({ success: true })
+    : res.status(500).json({ success: false });
 });
 
-// Add this route to serve your main Atomo website
-app.get('/website', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+// ---------------------------------------------------------------------
+// 8. Static pages
+// ---------------------------------------------------------------------
+app.get('/website', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/admin',   (_req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/',        (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+
+// ---------------------------------------------------------------------
+// 9. Multer error handling
+// ---------------------------------------------------------------------
+app.use((err, _req, res, _next) => {
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE')
+    return res.status(400).json({ success: false, message: 'File > 5 MB' });
+  res.status(500).json({ success: false, message: err.message });
 });
 
-// Also update your existing routes to serve from correct directory
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html')); // or your main site
-});
+// ---------------------------------------------------------------------
+// 10. Start HTTPS server on 0.0.0.0
+// ---------------------------------------------------------------------
+const server = https.createServer(credentials, app);
 
-// Serve admin page
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin.html'));
-});
-
-// Error handling
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ success: false, message: 'File too large. Maximum size is 5MB.' });
-    }
-  }
-  res.status(500).json({ success: false, message: error.message });
-});
-
-// Create HTTPS server
-const httpsOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'key.pem')),
-  cert: fs.readFileSync(path.join(__dirname, 'cert.pem'))
-};
-
-const server = https.createServer(httpsOptions, app);
-
-// Start HTTPS server on all network interfaces
 server.listen(PORT, '0.0.0.0', () => {
-  initializeNewsFile();
-  const uploadsDir = path.join(__dirname, 'uploads');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
+  initNews();
+  fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
 
-  console.log(`🔒 HTTPS Server running on all network interfaces!`);
-  console.log(`📍 Local access:`);
-  console.log(`   https://localhost:${PORT}`);
-  console.log(`   https://127.0.0.1:${PORT}`);
-
-  console.log(`🌐 Network access from other devices:`);
-  console.log(`   https://atomo.in:${PORT}`);
-
-  console.log(`\n📝 Admin panel: https://localhost:${PORT}/admin`);
-  console.log(`🌐 Main website: https://localhost:${PORT}/`);
-  console.log(`📁 Current directory: ${__dirname}`);
-
-  if (networkIPs.length === 0) {
-    console.log(`\n⚠️  No network IPs found. Make sure you're connected to a network.`);
-  } else {
-    console.log(`\n💡 To access from other devices, use any of the network URLs above.`);
-  }
+  console.log('\nHTTPS Server running on all interfaces');
+  console.log(`   Local : https://localhost:${PORT}`);
+  console.log(`   LAN   : https://${EXTERNAL_IP}:${PORT}`);
+  console.log(`   Public: https://127.0.0.53:${PORT}`);
+  console.log(`   Admin : https://3.110.51.14:${PORT}/admin`);
+  console.log(`   API   : https://3.110.51.14:${PORT}/api/news\n`);
 });
